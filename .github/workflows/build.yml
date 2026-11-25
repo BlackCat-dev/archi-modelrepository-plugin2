@@ -28,23 +28,11 @@ jobs:
 
           mkdir -p archi-dist
 
-          BASE="https://github.com/archimatetool/archi.io/releases/download"
-          FILE="Archi-Linux64-5.10.0.tgz"
-
-          for TAG in 5.10 5.10_0 5_10 5.10.0; do
-            echo "Trying release tag: $TAG"
-
-            if curl -fL --retry 2 \
-              "$BASE/$TAG/$FILE" \
-              -o archi.tgz; then
-              break
-            fi
-
-            rm -f archi.tgz
-          done
+          curl -fL --retry 3 \
+            "https://www.archimatetool.com/downloads/archi/archive/5.10.0/Archi-Linux64-5.10.0.tgz" \
+            -o archi.tgz
 
           test -s archi.tgz
-
           tar -tzf archi.tgz > /dev/null
           tar -xzf archi.tgz -C archi-dist
 
@@ -77,7 +65,6 @@ jobs:
           jars += list(output.glob("*.jar"))
 
           cp = ":".join(str(p.resolve()) for p in jars)
-
           pathlib.Path("classpath.txt").write_text(cp)
 
           print("Dependency JARs:", len(jars))
