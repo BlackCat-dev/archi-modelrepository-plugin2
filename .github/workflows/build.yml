@@ -22,35 +22,34 @@ jobs:
           java-version: '21'
 
       - name: Download Archi 5.10.0
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p archi-dist
 
-          python3 - <<'PY'
-          import json
-          import urllib.request
+          BASE="https://github.com/archimatetool/archi.io/releases/download"
+          FILE="Archi-Linux64-5.10.0.tgz"
 
-          base = "https://api.github.com/repos/archimatetool/archi.io/releases"
-          for tag in ["5.10", "5.10_0", "5.10.0", "5_10_0"]:
-              try:
-                  with urllib.request.urlopen(base + "/tags/" + tag) as r:
-                      release = json.load(r)
-              except urllib.error.HTTPError:
-                  continue
+          for TAG in 5.10 5.10_0 5_10 5.10.0; do
+            echo "Trying release tag: $TAG"
 
-              for asset in release.get("assets", []):
-                  name = asset["name"]
-                  if "linux" in name.lower() and name.endswith((".tgz", ".tar.gz")):
-                      print("Downloading:", name)
-                      urllib.request.urlretrieve(
-                          asset["browser_download_url"],
-                          "archi.tgz"
-                      )
-                      raise SystemExit(0)
+            if curl -fL --retry 2 \
+              "$BASE/$TAG/$FILE" \
+              -o archi.tgz; then
+              break
+            fi
 
-          raise SystemExit("Archi Linux distribution not found")
-          PY
+            rm -f archi.tgz
+          done
 
+          test -s archi.tgz
+
+          tar -tzf archi.tgz > /dev/null
           tar -xzf archi.tgz -C archi-dist
+
+          echo "Archi successfully extracted"
+          ls -la archi-dist
 
       - name: Prepare dependencies
         run: |
@@ -63,20 +62,22 @@ jobs:
           root = pathlib.Path("archi-dist")
           output = pathlib.Path("dependencies")
 
-          for i, jar in enumerate(root.rglob("plugins/*.jar")):
+          jars = list(root.rglob("plugins/*.jar"))
+
+          if not jars:
+              raise SystemExit("No dependency JARs found")
+
+          for i, jar in enumerate(jars):
               with zipfile.ZipFile(jar) as z:
                   for j, name in enumerate(z.namelist()):
                       if name.endswith(".jar"):
                           target = output / f"{i}-{j}-{pathlib.Path(name).name}"
                           target.write_bytes(z.read(name))
 
-          jars = list(root.rglob("plugins/*.jar"))
           jars += list(output.glob("*.jar"))
 
-          if not jars:
-              raise SystemExit("No dependency JARs found")
-
           cp = ":".join(str(p.resolve()) for p in jars)
+
           pathlib.Path("classpath.txt").write_text(cp)
 
           print("Dependency JARs:", len(jars))
@@ -99,10 +100,13 @@ jobs:
           mkdir -p build/package
           mkdir -p dist
 
+          echo "Building coArchi2 $VERSION"
+
           grep -q 'Bundle-Version: 1.3.5' \
             "$MAIN/META-INF/MANIFEST.MF"
 
-          find "$MAIN/src" -name '*.java' > build/main-sources.txt
+          find "$MAIN/src" \
+            -name '*.java' > build/main-sources.txt
 
           javac --release 21 \
             -encoding UTF-8 \
@@ -110,7 +114,8 @@ jobs:
             -d build/main-classes \
             @build/main-sources.txt
 
-          find "$CLI/src" -name '*.java' > build/cli-sources.txt
+          find "$CLI/src" \
+            -name '*.java' > build/cli-sources.txt
 
           javac --release 21 \
             -encoding UTF-8 \
@@ -181,7 +186,14 @@ jobs:
           zip -r ../../dist/coArchi2_1.3.5.archiplugin .
           cd ../..
 
+          echo "Build completed"
           unzip -l dist/coArchi2_1.3.5.archiplugin
+
+      - name: Verify plugin archive
+        run: |
+          unzip -t dist/coArchi2_1.3.5.archiplugin
+          sha256sum dist/coArchi2_1.3.5.archiplugin
+          ls -lh dist/
 
       - name: Upload coArchi2 plugin
         uses: actions/upload-artifact@v4
