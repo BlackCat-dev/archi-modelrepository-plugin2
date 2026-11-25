@@ -13,22 +13,179 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Check build environment
+      - name: Download Archi 5.10.0
         run: |
-          java -version
-          javac -version
-          mvn -version
-          git --version
+          mkdir -p archi-dist
 
-      - name: Check coArchi2 version
+          python3 - <<'PY'
+          import json
+          import urllib.request
+
+          base = "https://api.github.com/repos/archimatetool/archi.io/releases"
+          for tag in ["5.10", "5.10_0", "5.10.0", "5_10_0"]:
+              try:
+                  with urllib.request.urlopen(base + "/tags/" + tag) as r:
+                      release = json.load(r)
+              except urllib.error.HTTPError:
+                  continue
+
+              for asset in release.get("assets", []):
+                  name = asset["name"]
+                  if "linux" in name.lower() and name.endswith((".tgz", ".tar.gz")):
+                      print("Downloading:", name)
+                      urllib.request.urlretrieve(
+                          asset["browser_download_url"],
+                          "archi.tgz"
+                      )
+                      raise SystemExit(0)
+
+          raise SystemExit("Archi Linux distribution not found")
+          PY
+
+          tar -xzf archi.tgz -C archi-dist
+
+      - name: Prepare dependencies
         run: |
-          grep Bundle-Version com.archimatetool.modelrepository/META-INF/MANIFEST.MF
-          ls -la
+          mkdir -p dependencies
+
+          python3 - <<'PY'
+          import pathlib
+          import zipfile
+
+          root = pathlib.Path("archi-dist")
+          output = pathlib.Path("dependencies")
+
+          for i, jar in enumerate(root.rglob("plugins/*.jar")):
+              with zipfile.ZipFile(jar) as z:
+                  for j, name in enumerate(z.namelist()):
+                      if name.endswith(".jar"):
+                          target = output / f"{i}-{j}-{pathlib.Path(name).name}"
+                          target.write_bytes(z.read(name))
+
+          jars = list(root.rglob("plugins/*.jar"))
+          jars += list(output.glob("*.jar"))
+
+          if not jars:
+              raise SystemExit("No dependency JARs found")
+
+          cp = ":".join(str(p.resolve()) for p in jars)
+          pathlib.Path("classpath.txt").write_text(cp)
+
+          print("Dependency JARs:", len(jars))
+          PY
+
+      - name: Compile and package coArchi2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN=com.archimatetool.modelrepository
+          CLI=com.archimatetool.modelrepository.commandline
+          CP=$(cat classpath.txt)
+          VERSION=1.3.5.$(date -u +%Y%m%d%H%M)
+
+          mkdir -p build/main-classes
+          mkdir -p build/cli-classes
+          mkdir -p build/main-bundle
+          mkdir -p build/cli-bundle
+          mkdir -p build/package
+          mkdir -p dist
+
+          grep -q 'Bundle-Version: 1.3.5' \
+            "$MAIN/META-INF/MANIFEST.MF"
+
+          find "$MAIN/src" -name '*.java' > build/main-sources.txt
+
+          javac --release 21 \
+            -encoding UTF-8 \
+            -cp "$CP" \
+            -d build/main-classes \
+            @build/main-sources.txt
+
+          find "$CLI/src" -name '*.java' > build/cli-sources.txt
+
+          javac --release 21 \
+            -encoding UTF-8 \
+            -cp "$CP:$PWD/build/main-classes" \
+            -d build/cli-classes \
+            @build/cli-sources.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          projects = [
+              ("com.archimatetool.modelrepository", "main"),
+              ("com.archimatetool.modelrepository.commandline", "cli")
+          ]
+
+          for project, name in projects:
+              src = Path(project) / "src"
+              dst = Path("build") / (name + "-classes")
+
+              for p in src.rglob("*"):
+                  if p.is_file() and p.suffix != ".java":
+                      target = dst / p.relative_to(src)
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(p, target)
+          PY
+
+          for item in LICENSE.txt plugin.xml plugin.properties img help logging.properties; do
+            if [ -e "$MAIN/$item" ]; then
+              cp -r "$MAIN/$item" build/main-bundle/
+            fi
+          done
+
+          for item in LICENSE.txt plugin.xml plugin.properties; do
+            if [ -e "$CLI/$item" ]; then
+              cp -r "$CLI/$item" build/cli-bundle/
+            fi
+          done
+
+          cp -r "$MAIN/META-INF" build/main-bundle/
+          cp -r "$CLI/META-INF" build/cli-bundle/
+
+          sed -i "s/^Bundle-Version:.*/Bundle-Version: $VERSION/" \
+            build/main-bundle/META-INF/MANIFEST.MF \
+            build/cli-bundle/META-INF/MANIFEST.MF
+
+          jar --create \
+            --file "build/main-bundle/$MAIN.jar" \
+            -C build/main-classes .
+
+          cp -r build/cli-classes/. build/cli-bundle/
+
+          jar --create \
+            --file "build/package/${MAIN}_${VERSION}.jar" \
+            --manifest build/main-bundle/META-INF/MANIFEST.MF \
+            -C build/main-bundle .
+
+          jar --create \
+            --file "build/package/${CLI}_${VERSION}.jar" \
+            --manifest build/cli-bundle/META-INF/MANIFEST.MF \
+            -C build/cli-bundle .
+
+          printf '%s' \
+            'Magic file to signify this is an Archi plug-in bundle.' \
+            > build/package/archi-plugin
+
+          cd build/package
+          zip -r ../../dist/coArchi2_1.3.5.archiplugin .
+          cd ../..
+
+          unzip -l dist/coArchi2_1.3.5.archiplugin
+
+      - name: Upload coArchi2 plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: coArchi2-1.3.5
+          path: dist/coArchi2_1.3.5.archiplugin
+          if-no-files-found: error
